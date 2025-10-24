@@ -59,23 +59,11 @@ resources:
         3. Updates the table with new information
         4. Creates SCD Type 2 historical records
 
-      # Job configuration
-      job_clusters:
-        - job_cluster_key: main_cluster
-          new_cluster:
-            spark_version: 14.3.x-scala2.12
-            node_type_id: i3.xlarge
-            num_workers: 2
-            spark_conf:
-              spark.databricks.delta.preview.enabled: "true"
-            custom_tags:
-              project: lakeflow_parallel_web_search
-              environment: ${bundle.target}
+      # Using serverless compute - no job_clusters needed
 
       tasks:
         # Task 1: Get all feature IDs
         - task_key: get_feature_ids
-          job_cluster_key: main_cluster
           notebook_task:
             notebook_path: ./src/02_get_feature_ids.py
             source: WORKSPACE
@@ -90,9 +78,9 @@ resources:
             - task_key: get_feature_ids
           for_each_task:
             inputs: "{{tasks.get_feature_ids.values.feature_ids}}"
+            concurrency: 10  # Process up to 10 features in parallel
             task:
               task_key: process_single_feature
-              job_cluster_key: main_cluster
               notebook_task:
                 notebook_path: ./src/03_process_feature_with_claude.py
                 source: WORKSPACE
@@ -102,14 +90,11 @@ resources:
               libraries:
                 - pypi:
                     package: anthropic
-          # Control concurrency - process features in batches
-          max_concurrent_runs: 10
 
         # Task 3: Create SCD Type 2 table from CDF
         - task_key: create_scd_type2
           depends_on:
             - task_key: process_features_parallel
-          job_cluster_key: main_cluster
           notebook_task:
             notebook_path: ./src/04_create_scd_type2_table.py
             source: WORKSPACE
@@ -136,9 +121,6 @@ resources:
       # Max concurrent runs
       max_concurrent_runs: 1
 
-      # Retry policy
-      max_retries: 0  # Don't auto-retry on failure, investigate first
-
       # Tags for organization
       tags:
         project: lakeflow_parallel_web_search
@@ -148,9 +130,6 @@ resources:
       # Run as configuration
       run_as:
         user_name: tahir.fayyaz@databricks.com
-
-      # Format version
-      format: MULTI_TASK
 
 # Permissions for the bundle resources
 permissions:
