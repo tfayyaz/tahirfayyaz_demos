@@ -1,0 +1,158 @@
+# Databricks Asset Bundle configuration for Parallel Web Search Agents with Lakeflow
+
+bundle:
+  name: lakeflow_parallel_web_search_agents
+
+# Include additional configuration files
+include:
+  - resources/*.yml
+
+# Variables that can be referenced in the bundle
+variables:
+  catalog_name:
+    description: Unity Catalog name
+    default: this_is_for_tahir_only
+
+  schema_name:
+    description: Schema name within the catalog
+    default: robocars
+
+# Workspace configuration
+workspace:
+  host: https://dbc-08fc9045-faef.cloud.databricks.com/
+
+# Target environments
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-08fc9045-faef.cloud.databricks.com/
+    variables:
+      catalog_name: this_is_for_tahir_only
+      schema_name: robocars
+
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-08fc9045-faef.cloud.databricks.com/
+      # Uncomment and set the root path for production deployments
+      # root_path: /Workspace/Production/lakeflow_parallel_web_search_agents
+    variables:
+      catalog_name: this_is_for_tahir_only
+      schema_name: robocars
+    # Add production-specific settings like approval requirements
+    run_as:
+      # service_principal_name: "sp-production-jobs"
+      user_name: "tahir.fayyaz@databricks.com"
+
+# Resources
+resources:
+  jobs:
+    feature_news_update_workflow:
+      name: "[${bundle.target}] Feature News Update Workflow"
+      description: |
+        Lakeflow job that orchestrates parallel web search for self-driving car features.
+        This workflow:
+        1. Retrieves all feature IDs from the Unity Catalog table
+        2. Processes each feature in parallel using Claude API with web search
+        3. Updates the table with new information
+        4. Creates SCD Type 2 historical records
+
+      # Job configuration
+      job_clusters:
+        - job_cluster_key: main_cluster
+          new_cluster:
+            spark_version: 14.3.x-scala2.12
+            node_type_id: i3.xlarge
+            num_workers: 2
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+            custom_tags:
+              project: lakeflow_parallel_web_search
+              environment: ${bundle.target}
+
+      tasks:
+        # Task 1: Get all feature IDs
+        - task_key: get_feature_ids
+          job_cluster_key: main_cluster
+          notebook_task:
+            notebook_path: ./src/02_get_feature_ids.py
+            source: WORKSPACE
+          timeout_seconds: 600
+          libraries:
+            - pypi:
+                package: anthropic
+
+        # Task 2: Process each feature in parallel using for_each
+        - task_key: process_features_parallel
+          depends_on:
+            - task_key: get_feature_ids
+          for_each_task:
+            inputs: "{{tasks.get_feature_ids.values.feature_ids}}"
+            task:
+              task_key: process_single_feature
+              job_cluster_key: main_cluster
+              notebook_task:
+                notebook_path: ./src/03_process_feature_with_claude.py
+                source: WORKSPACE
+                base_parameters:
+                  core_feature_id: "{{input}}"
+              timeout_seconds: 300
+              libraries:
+                - pypi:
+                    package: anthropic
+          # Control concurrency - process features in batches
+          max_concurrent_runs: 10
+
+        # Task 3: Create SCD Type 2 table from CDF
+        - task_key: create_scd_type2
+          depends_on:
+            - task_key: process_features_parallel
+          job_cluster_key: main_cluster
+          notebook_task:
+            notebook_path: ./src/04_create_scd_type2_table.py
+            source: WORKSPACE
+          timeout_seconds: 900
+
+      # Schedule - run daily at 2 AM UTC
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: "UTC"
+        pause_status: PAUSED  # Start paused, user can unpause when ready
+
+      # Email notifications
+      email_notifications:
+        on_success:
+          - tahir.fayyaz@databricks.com
+        on_failure:
+          - tahir.fayyaz@databricks.com
+        on_duration_warning_threshold_exceeded:
+          - tahir.fayyaz@databricks.com
+
+      # Timeout for entire workflow
+      timeout_seconds: 7200  # 2 hours
+
+      # Max concurrent runs
+      max_concurrent_runs: 1
+
+      # Retry policy
+      max_retries: 0  # Don't auto-retry on failure, investigate first
+
+      # Tags for organization
+      tags:
+        project: lakeflow_parallel_web_search
+        team: data_engineering
+        cost_center: analytics
+
+      # Run as configuration
+      run_as:
+        user_name: tahir.fayyaz@databricks.com
+
+      # Format version
+      format: MULTI_TASK
+
+# Permissions for the bundle resources
+permissions:
+  - level: CAN_MANAGE
+    user_name: tahir.fayyaz@databricks.com
